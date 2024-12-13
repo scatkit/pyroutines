@@ -1,4 +1,4 @@
-from classes import *
+from channel_init import *
 from random import randint
 import builtins
 

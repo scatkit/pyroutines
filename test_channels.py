@@ -1,5 +1,5 @@
-from pycon import *
-from classes import *
+from concurrency import *
+from channel_init import *
 
 # Create a channel with a capacity of 2
 chan = make()
