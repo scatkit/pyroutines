@@ -6,7 +6,7 @@ execution_queue = []
 
 def go(callback):
     if callback:
-        execution_queue.append(callback)
+        execution_queue.append(callback) 
 
 def run():
     WaitingQueue.total = 0
@@ -47,12 +47,12 @@ def send(channel, value, callback):
         return
         
     if len(channel) < cap(channel):
-        channel.buffer.append(value,)
+        channel.buffer.append(value)
         go(callback)
         return
     
     print(f"Enqueuing {(value,callback)} to the waiting channel")
-    channel.waiting_to_send.enqueue((value,callback))
+    channel.waiting_to_send.enqueue(value)
 
 def recv(channel, callback):
     # Receiving from nil channel blocks forever
@@ -62,10 +62,11 @@ def recv(channel, callback):
         return
     
     if len(channel) > 0:
-        print("Sent from buffer")
-        val = channel.buffer.pop(0)
-        print(val)
-        return val, True
+        print("Sent from the buffer")
+        value = channel.buffer.pop(0)
+        print(value)
+        go(lambda: callback(value, True)) 
+        return
     
     # In case send is called first
     if channel.waiting_to_send: 
@@ -103,32 +104,27 @@ def close(channel):
         recv(channel, callback)
         
 
-#select(
-#  [
-#    (recv, ch1, lambda v1, ok: print("received!", v1, ok)),
-#    (send, ch2, v2, lambda: print("sent!")),
-#    (default, lambda: print("default!"))
-#  ],
-#  lambda: print("after select")
-#)  
 
 default = object()
 def select(cases, callback=None):
-    def is_ready(case):
+    def is_ready(case): 
         if case[0] == send:
-            return case[1].closed or case[1].waiting_to_recv # if either true, returns true
+            return case[1].closed or len(case[1]) < cap(case[1]) or case[1].waiting_to_recv # if either true, returns true
         elif case[0] == recv:
-            return case[1].closed or case[1].waiting_to_send
+            return case[1].closed or len(case[1]) > 0 or  case[1].waiting_to_send # if value are in the waiting_to_send queue or inside the buffer
         elif case[0] == default:
             return False
         
+    '''
+    Case structure: [recv, Channel, callback(value, ok)]
+    '''
     ready_to_proceed = [case for case in cases if is_ready(case)]
     
     if ready_to_proceed:
         case = ready_to_proceed[randint(0,builtins.len(ready_to_proceed)-1)] #send or recv
         if case[0] == send:
             send(case[1],case[2],case[3]) #channel, value, callback
-        elif case[1] == recv: 
+        elif case[0] == recv: 
             recv(case[1],case[2]) #channel, callback
         go(callback)
         return
@@ -136,7 +132,7 @@ def select(cases, callback=None):
     defaults = [case for case in cases if case[0] == default]
     
     if defaults:
-        default[0]()
+        defaults[0]() 
         go(callback)
         return
     
@@ -145,12 +141,15 @@ def select(cases, callback=None):
     def cleanup():
         for case in wrapped:
             if case[0] == send:
-                case[1].waiting_t_send.dequeue() # case[1] is channel
+                case[1].waiting_to_send.dequeue((case[2], case[3])) # case[1] is channel, case[2] is val, case[3] is callback
+            elif case[0] == recv:
+                case[1].wating_to_recv.dequeue(case[2])
+        go(callback)
     
     for case in cases:
         if case[0] == send:
-            new_case = (case[0],case[1],case[2], lambda: (cleanup(), case[3]()))
-            case[1].waiting_to_send.enqueue(new_case[2], case[3]) # value, callback
+            new_case = (case[0],case[1],case[2], lambda: (cleanup(), case[3]())) 
+            case[1].waiting_to_send.enqueue((new_case[2], case[3])) # value, callback
             wrapped.append(new_case)
             
         elif case[0] == recv:
@@ -158,4 +157,3 @@ def select(cases, callback=None):
             case[1].waiting_to_recv.enqueue(new_case[2])
             wrapped.append(new_case)
             
-    

@@ -16,15 +16,14 @@ def sender_done():
     print("Value sent successfully.")
 
 # Sending values into the channel
-#go(lambda: send(chan, 99, sender_done))
-#go(lambda: send(chan, 88, sender_done))
-#go(lambda: send(chan, 12, sender_done))
-#go(lambda: send(chan, 17, sender_done))
+go(lambda: send(chan, 42, sender_done))
+go(lambda: send(chan, 99, sender_done))
+go(lambda: send(chan, 88, sender_done))
+go(lambda: send(chan, 12, sender_done))
+go(lambda: send(chan, 17, sender_done))
 
 # Even thought the channel is closed, it sends from the buffer 
-go(lambda: recv(chan, receiver))
-go(lambda: send(chan, 42, sender_done))
-
+select()
 # Run the event loop
 run()
 
