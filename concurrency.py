@@ -1,159 +1,119 @@
 from channel_init import *
 from random import randint
 import builtins
+import asyncio
 
 execution_queue = []
 
-def go(callback):
-    if callback:
-        execution_queue.append(callback) 
+def go(task):
+    if task:
+        asyncio.create_task(task) # execution queue provided by asyn
 
-def run():
-    WaitingQueue.total = 0
-    while execution_queue:
-        f = execution_queue.pop(0)
-        f()
-    try:
-        if WaitingQueue.total > 0:
-            raise Exception("Fatal Error: all go routines are asleep! - deadlock")
-    except Exception as e:
-        print(e)
-                
 
 def make(capacity=0):
     return Channel(capacity)
 
-def len(channel):
+def len_buf(channel):
     return builtins.len(channel.buffer)
 
 def cap(channel):
    return channel.capacity
 
-def send(channel, value, callback):
+async def send(channel, value): 
     if not channel:
-        WaitingQueue.total+=1
-        return
-    
+        await asyncio.Future() 
+        
     if channel.closed:
         raise Exception("send on a closed channel")
     
-    # In case recv was called first
     if channel.waiting_to_recv:
-        print(f"Length of the recv channel: {builtins.len(channel.waiting_to_recv)}")
-        receiver = channel.waiting_to_recv.dequeue() # recv's callback
-        print(f"Reciver: {receiver}")
-        go(callback) # Running the send's callback before recv's
-        go(lambda: receiver(value, True)) 
+        future = channel.waiting_to_recv.dequeue() # receives the box
+        future.set_result((value, True)) # put data into the box
         return
         
-    if len(channel) < cap(channel):
+    if len_buf(channel) < cap(channel):
         channel.buffer.append(value)
-        go(callback)
         return
     
-    print(f"Enqueuing {(value,callback)} to the waiting channel")
-    channel.waiting_to_send.enqueue(value)
+    future = asyncio.Future()
+    channel.waiting_to_send.enqueue((value, future)) # save the data
+    await future # waiting for the box
 
-def recv(channel, callback):
-    # Receiving from nil channel blocks forever
+async def recv(channel):
     if not channel:
-        print("Channel is nil")
-        WaitingQueue.total+=1 
-        return
+        await asyncio.Future()
     
-    if len(channel) > 0:
-        print("Sent from the buffer")
+    if len_buf(channel) > 0:
         value = channel.buffer.pop(0)
-        print(value)
-        go(lambda: callback(value, True)) 
-        return
+        return value, True
     
-    # In case send is called first
+    # in case there are still some values in WQS
     if channel.waiting_to_send: 
-        print(f"Length of the wait channel: {builtins.len(channel.waiting_to_send)}")
-        value, sender = channel.waiting_to_send.dequeue() 
-        print(f"Value received: {value}. Sender: {sender}")
-        go(lambda: callback(value, True))
-        go(sender)
-        return
+        value, future = channel.waiting_to_send.dequeue() # data, box
+        future.set_result(None) 
+        return value, True
         
-    # A receiver on a closed channel can always proceed immediately,
-    # yeilding the element type's zero value 
     if channel.closed:
-        go(lambda: callback(None, False))
-        return
+        return None, False
         
-    # If recv is called first, enqueue that and wait for sending channel
-    print(f"Equeuing {callback} to recv channel queue")
-    channel.waiting_to_recv.enqueue(callback)
-    
-def close(channel):
-    if channel.closed:
-        raise Exception("close of a closed channel")
-    
-    channel.closed = True
-    
-        # Complete any senders
-    while channel.waiting_to_send:
-        value, callback = channel.waiting_to_send.dequeue()
-        send(channel, value, callback)
-        
-        # Complete any receivers
-    while channel.waiting_to_recv:
-        callback = channel.waiting_to_recv.dequeue()
-        recv(channel, callback)
-        
+    future = asyncio.Future()
+    channel.waiting_to_recv.enqueue(future) # sends the box
+    value, ok = await future # waits for WQS to put data in and return it
+    return value, ok
 
 
-default = object()
-def select(cases, callback=None):
+default = object() 
+ 
+async def select(cases):
+    
+    # Block forever
+    if builtins.len(cases) == 0:
+        await asyncio.Future()
+    
     def is_ready(case): 
         if case[0] == send:
-            return case[1].closed or len(case[1]) < cap(case[1]) or case[1].waiting_to_recv # if either true, returns true
+            return case[1].closed or len_buf(case[1]) < cap(case[1]) or case[1].waiting_to_recv # if either true, returns true
         elif case[0] == recv:
-            return case[1].closed or len(case[1]) > 0 or  case[1].waiting_to_send # if value are in the waiting_to_send queue or inside the buffer
+            return case[1].closed or len_buf(case[1]) > 0 or case[1].waiting_to_send # if value are in the waiting_to_send queue or inside the buffer
         elif case[0] == default:
             return False
         
-    '''
-    Case structure: [recv, Channel, callback(value, ok)]
-    '''
     ready_to_proceed = [case for case in cases if is_ready(case)]
     
     if ready_to_proceed:
         case = ready_to_proceed[randint(0,builtins.len(ready_to_proceed)-1)] #send or recv
         if case[0] == send:
-            send(case[1],case[2],case[3]) #channel, value, callback
+            await send(case[1],case[2]) #channel, value, callback
+            await case[3]()
         elif case[0] == recv: 
-            recv(case[1],case[2]) #channel, callback
-        go(callback)
+            value, ok = await recv(case[1]) #channel, callback
+            await case[2](value, ok)
         return
     
     defaults = [case for case in cases if case[0] == default]
     
     if defaults:
-        defaults[0]() 
-        go(callback)
+        await defaults[0]() 
         return
     
-    wrapped = []
-    
-    def cleanup():
-        for case in wrapped:
-            if case[0] == send:
-                case[1].waiting_to_send.dequeue((case[2], case[3])) # case[1] is channel, case[2] is val, case[3] is callback
-            elif case[0] == recv:
-                case[1].wating_to_recv.dequeue(case[2])
-        go(callback)
+    futures = []
     
     for case in cases:
+        future = asyncio.Future()
         if case[0] == send:
-            new_case = (case[0],case[1],case[2], lambda: (cleanup(), case[3]())) 
-            case[1].waiting_to_send.enqueue((new_case[2], case[3])) # value, callback
-            wrapped.append(new_case)
-            
+            case[1].waiting_to_send.enqueue((case[2], future))
         elif case[0] == recv:
-            new_case = (case[0], case[1], lambda value, ok: (cleanup(), case[2](value, ok)))
-            case[1].waiting_to_recv.enqueue(new_case[2])
-            wrapped.append(new_case)
-            
+            case[1].waiting_to_recv.enqueue(future)
+        
+    # as some futures get done, they get appended to the futures array
+    done, _ =  asyncio.wait(futures, return_when = asyncio.FIRST_COMPLETE)
+    
+    for i, future in enumerate(futures):
+        if future == done[0]:
+            if cases[i][0] == send:
+                await future 
+                await case[3]() 
+            elif case[i][0] == recv:
+                value, ok = await future # waiting to receive a value
+                await case[i][2](value, ok) #sending it back
+
